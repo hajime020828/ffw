@@ -1,0 +1,531 @@
+Option Explicit
+
+'============================
+' Settings
+'============================
+Private Const LINK_RATIO As Double = 0.17
+
+Private Const SH_PORT As String = "Sheet2"   '現ポート
+Private Const SH_CHG  As String = "Sheet3"   '変更
+Private Const SH_OUT  As String = "Sheet4"   '出力
+
+'Bloomberg ticker suffix (例: "1301 JT Equity")
+Private Const BBG_SUFFIX As String = " JT Equity"
+
+'============================
+' Sheet4 column mapping (fixed)
+'============================
+Private Const C_CODE   As Long = 1   'A LOCAL_CODE
+Private Const C_TICKER As Long = 2   'B Ticker
+Private Const C_NAME   As Long = 3   'C Name (BBG)
+Private Const C_PX     As Long = 4   'D JPY Price (BBG LAST_PRICE)
+Private Const C_VOL20  As Long = 5   'E VOLUME_AVG_20D (BBG)
+Private Const C_USDJPY As Long = 6   'F USDJPY (BBG)  ※F2 only
+
+Private Const C_PRE_TOT  As Long = 7   'G PRE_TOT_SHARES
+Private Const C_POST_TOT As Long = 8   'H POST_TOT_SHARES
+Private Const C_PRE_FFW  As Long = 9   'I PRE_FFW
+Private Const C_POST_FFW As Long = 10  'J POST_FFW
+Private Const C_PRE_IDX  As Long = 11  'K PRE_IDX_SHARES
+Private Const C_POST_IDX As Long = 12  'L POST_IDX_SHARES
+
+Private Const C_CAT       As Long = 13 'M Category
+Private Const C_CUR_SH_MM As Long = 14 'N Current Shares Out (MM)
+Private Const C_NEW_SH_MM As Long = 15 'O New Shares Out (MM)
+Private Const C_CHG_SH_MM As Long = 16 'P Change in Shares Out (MM)
+Private Const C_CUR_F     As Long = 17 'Q Current Float
+Private Const C_NEW_F     As Long = 18 'R New Float
+Private Const C_CHG_F     As Long = 19 'S Change in Float
+Private Const C_PRE_W     As Long = 20 'T Curr Idx Wgt %
+Private Const C_POST_W    As Long = 21 'U New Idx Wgt %
+Private Const C_DW        As Long = 22 'V Wgt Change
+Private Const C_TRD_JPY   As Long = 23 'W Value to Trade (JPY)
+Private Const C_TRD_USD   As Long = 24 'X Value to Trade (USD)
+Private Const C_SH_TRADE  As Long = 25 'Y Shares to Trade
+Private Const C_LIQ       As Long = 26 'Z Liquidity
+
+'========================================================
+' STEP1 (fast): build PRE/POST levels and set BBG formulas on Sheet4
+'========================================================
+Public Sub STEP1_Prepare_Sheet4_BBG()
+    Dim rebDate As Long
+    rebDate = CLng(InputBox("Rebalance Date (yyyymmdd)", "Rebalance", "20260130"))
+    If rebDate = 0 Then Exit Sub
+
+    Dim wsP As Worksheet, wsC As Worksheet, wsO As Worksheet
+    Set wsP = ThisWorkbook.Worksheets(SH_PORT)
+    Set wsC = ThisWorkbook.Worksheets(SH_CHG)
+    Set wsO = ThisWorkbook.Worksheets(SH_OUT)
+
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    Dim baseDate As Long
+    baseDate = GetBaseDate(wsP)
+
+    Dim baseDict As Object, preDict As Object, postDict As Object
+    Set baseDict = LoadPortfolio_S2(wsP)
+
+    Set preDict = CloneHoldings(baseDict)
+    ApplyChanges_S3_Overwrite preDict, wsC, baseDate + 1, rebDate - 1
+
+    Set postDict = CloneHoldings(preDict)
+    ApplyChanges_S3_Overwrite postDict, wsC, rebDate, rebDate
+
+    PrepareSheet4Layout wsO
+    FillSheet4UniverseAndLevels wsO, preDict, postDict
+    SetBBGFormulas wsO
+
+    'メモ（任意）
+    wsO.Range("AA1").Value = "LinkedRatio"
+    wsO.Range("AA2").Value = LINK_RATIO
+    wsO.Range("AB1").Value = "RebalanceDate"
+    wsO.Range("AB2").Value = rebDate
+
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+
+    MsgBox "STEP1 done. Wait until BBG data (Price/Vol20/USDJPY/Name) are filled, then run STEP2."
+End Sub
+
+'========================================================
+' STEP2 (fast): calculate using Sheet4 values
+' Total index value = SUM(JPY Price * POST_IDX_SHARES)
+' Linked AUM = Total index value * 0.17
+'========================================================
+Public Sub STEP2_Calc_From_Sheet4()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets(SH_OUT)
+
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, C_CODE).End(xlUp).Row
+    If lastRow < 2 Then GoTo ExitHere
+
+    'BBG必須チェック（未取得なら止める）
+    If ToDbl(ws.Cells(2, C_USDJPY).Value2) <= 0 Then GoTo NotReady
+
+    Dim r As Long
+    For r = 2 To lastRow
+        If ToDbl(ws.Cells(r, C_PX).Value2) <= 0 Then GoTo NotReady
+        If ToDbl(ws.Cells(r, C_VOL20).Value2) <= 0 Then GoTo NotReady
+    Next r
+
+    CalcTradesOnSheet4 ws
+
+ExitHere:
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    MsgBox "STEP2 done."
+    Exit Sub
+
+NotReady:
+    Application.Calculation = xlCalculationAutomatic
+    Application.ScreenUpdating = True
+    MsgBox "BBG data not ready (JPY Price / VOLUME_AVG_20D / USDJPY)."
+End Sub
+
+'============================
+' Sheet4 layout
+'============================
+Private Sub PrepareSheet4Layout(ws As Worksheet)
+    ws.Cells.Clear
+
+    ws.Cells(1, C_CODE).Value = "LOCAL_CODE"
+    ws.Cells(1, C_TICKER).Value = "Ticker"
+    ws.Cells(1, C_NAME).Value = "Name"
+    ws.Cells(1, C_PX).Value = "JPY Price"
+    ws.Cells(1, C_VOL20).Value = "VOLUME_AVG_20D"
+    ws.Cells(1, C_USDJPY).Value = "USDJPY"
+
+    ws.Cells(1, C_PRE_TOT).Value = "PRE_TOT_SHARES"
+    ws.Cells(1, C_POST_TOT).Value = "POST_TOT_SHARES"
+    ws.Cells(1, C_PRE_FFW).Value = "PRE_FFW"
+    ws.Cells(1, C_POST_FFW).Value = "POST_FFW"
+    ws.Cells(1, C_PRE_IDX).Value = "PRE_IDX_SHARES"
+    ws.Cells(1, C_POST_IDX).Value = "POST_IDX_SHARES"
+
+    ws.Cells(1, C_CAT).Value = "Category"
+    ws.Cells(1, C_CUR_SH_MM).Value = "Current Shares Out (MM)"
+    ws.Cells(1, C_NEW_SH_MM).Value = "New Shares Out (MM)"
+    ws.Cells(1, C_CHG_SH_MM).Value = "Change in Shares Out (MM)"
+    ws.Cells(1, C_CUR_F).Value = "Current Float"
+    ws.Cells(1, C_NEW_F).Value = "New Float"
+    ws.Cells(1, C_CHG_F).Value = "Change in Float"
+    ws.Cells(1, C_PRE_W).Value = "Curr Idx Wgt %"
+    ws.Cells(1, C_POST_W).Value = "New Idx Wgt %"
+    ws.Cells(1, C_DW).Value = "Wgt Change"
+    ws.Cells(1, C_TRD_JPY).Value = "Value to Trade (JPY)"
+    ws.Cells(1, C_TRD_USD).Value = "Value to Trade (USD)"
+    ws.Cells(1, C_SH_TRADE).Value = "Shares to Trade"
+    ws.Cells(1, C_LIQ).Value = "Liquidity"
+End Sub
+
+'Union銘柄 + PRE/POSTレベルを書き込み（毎行0初期化）
+Private Sub FillSheet4UniverseAndLevels(ws As Worksheet, preD As Object, postD As Object)
+    Dim allKeys As Object: Set allKeys = CreateObject("Scripting.Dictionary")
+    allKeys.CompareMode = vbTextCompare
+
+    Dim k As Variant
+    For Each k In preD.Keys: allKeys(CStr(k)) = 1: Next
+    For Each k In postD.Keys: allKeys(CStr(k)) = 1: Next
+
+    Dim n As Long: n = allKeys.Count
+    If n = 0 Then Exit Sub
+
+    Dim arr() As Variant
+    ReDim arr(1 To n, 1 To 12) 'A..L（C..Fは空のまま）
+
+    Dim i As Long: i = 0
+    For Each k In allKeys.Keys
+        i = i + 1
+        Dim code As String: code = CStr(k)
+
+        Dim preTot As Double: preTot = 0#
+        Dim postTot As Double: postTot = 0#
+        Dim preF As Double: preF = 0#
+        Dim postF As Double: postF = 0#
+        Dim preIdx As Double: preIdx = 0#
+        Dim postIdx As Double: postIdx = 0#
+
+        If preD.Exists(code) Then
+            preTot = ToDbl(preD(code)("TOT_SHARES"))
+            preF = ToDbl(preD(code)("IDX_FFW"))
+            preIdx = ToDbl(preD(code)("IDX_SHARES"))
+        End If
+        If postD.Exists(code) Then
+            postTot = ToDbl(postD(code)("TOT_SHARES"))
+            postF = ToDbl(postD(code)("IDX_FFW"))
+            postIdx = ToDbl(postD(code)("IDX_SHARES"))
+        End If
+
+        arr(i, 1) = code
+        arr(i, 2) = Left$(Trim$(code), 4) & BBG_SUFFIX  '13010->1301, 167A0->167A
+
+        arr(i, 7) = preTot
+        arr(i, 8) = postTot
+        arr(i, 9) = preF
+        arr(i, 10) = postF
+        arr(i, 11) = preIdx
+        arr(i, 12) = postIdx
+    Next k
+
+    ws.Range(ws.Cells(2, C_CODE), ws.Cells(n + 1, C_POST_IDX)).Value = arr
+
+    'USDJPYはF2のみ
+    ws.Cells(2, C_USDJPY).Formula = "=BDP(""USDJPY Curncy"",""LAST_PRICE"")"
+End Sub
+
+'BBG式（Ticker列を必ず参照）
+Private Sub SetBBGFormulas(ws As Worksheet)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, C_CODE).End(xlUp).Row
+    If lastRow < 2 Then Exit Sub
+
+    Dim r As Long
+    For r = 2 To lastRow
+        Dim adrT As String: adrT = ws.Cells(r, C_TICKER).Address(False, False)
+        ws.Cells(r, C_PX).Formula = "=BDP(" & adrT & ",""LAST_PRICE"")"
+        ws.Cells(r, C_NAME).Formula = "=BDP(" & adrT & ",""NAME"")"
+        ws.Cells(r, C_VOL20).Formula = "=BDP(" & adrT & ",""VOLUME_AVG_20D"")"
+    Next r
+End Sub
+
+'============================
+' Core calc: Total index value auto = SUM(Price * POST_IDX_SHARES)
+'============================
+Private Sub CalcTradesOnSheet4(ws As Worksheet)
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, C_CODE).End(xlUp).Row
+    If lastRow < 2 Then Exit Sub
+
+    Dim usdJpy As Double: usdJpy = ToDbl(ws.Cells(2, C_USDJPY).Value2)
+
+    'Totals
+    Dim preTotMV As Double: preTotMV = 0#
+    Dim postTotMV As Double: postTotMV = 0# '＝Total index value（要求通り Price*POST_IDX を合計）
+
+    Dim r As Long
+    For r = 2 To lastRow
+        Dim px As Double: px = ToDbl(ws.Cells(r, C_PX).Value2)
+        preTotMV = preTotMV + px * ToDbl(ws.Cells(r, C_PRE_IDX).Value2)
+        postTotMV = postTotMV + px * ToDbl(ws.Cells(r, C_POST_IDX).Value2)
+    Next r
+    If preTotMV = 0 Then preTotMV = 1#
+    If postTotMV = 0 Then postTotMV = 1#
+
+    'Total index value & Linked AUM
+    Dim totalIndexValue As Double: totalIndexValue = postTotMV
+    Dim linkedAUM As Double: linkedAUM = totalIndexValue * LINK_RATIO
+
+    'メモ出力（任意）
+    ws.Range("AC1").Value = "TotalIndexValue(=Sum Price*POST_IDX)"
+    ws.Range("AC2").Value = totalIndexValue
+    ws.Range("AD1").Value = "LinkedAUM(=TotalIndexValue*0.17)"
+    ws.Range("AD2").Value = linkedAUM
+
+    Dim n As Long: n = lastRow - 1
+    Dim outArr() As Variant
+    ReDim outArr(1 To n, 1 To 14) 'M..Z
+
+    Dim i As Long: i = 0
+    For r = 2 To lastRow
+        i = i + 1
+
+        Dim px As Double: px = ToDbl(ws.Cells(r, C_PX).Value2)
+        Dim vol20 As Double: vol20 = ToDbl(ws.Cells(r, C_VOL20).Value2)
+
+        Dim preTot As Double: preTot = ToDbl(ws.Cells(r, C_PRE_TOT).Value2)
+        Dim postTot As Double: postTot = ToDbl(ws.Cells(r, C_POST_TOT).Value2)
+        Dim preF As Double: preF = ToDbl(ws.Cells(r, C_PRE_FFW).Value2)
+        Dim postF As Double: postF = ToDbl(ws.Cells(r, C_POST_FFW).Value2)
+        Dim preIdx As Double: preIdx = ToDbl(ws.Cells(r, C_PRE_IDX).Value2)
+        Dim postIdx As Double: postIdx = ToDbl(ws.Cells(r, C_POST_IDX).Value2)
+
+        Dim preW As Double: preW = (px * preIdx) / preTotMV
+        Dim postW As Double: postW = (px * postIdx) / postTotMV
+        Dim dW As Double: dW = postW - preW
+
+        Dim tradeJPY As Double: tradeJPY = dW * linkedAUM
+        Dim tradeUSD As Double: If usdJpy > 0 Then tradeUSD = tradeJPY / usdJpy Else tradeUSD = 0#
+        Dim sharesToTrade As Double: If px > 0 Then sharesToTrade = tradeJPY / px Else sharesToTrade = 0#
+        Dim liq As Double: If vol20 > 0 Then liq = sharesToTrade / vol20 Else liq = 0#
+
+        Dim cat As String: cat = GetCategory2(preTot, postTot, preF, postF, preIdx, postIdx)
+
+        outArr(i, 1) = cat
+        outArr(i, 2) = preTot / 1000000#
+        outArr(i, 3) = postTot / 1000000#
+        outArr(i, 4) = (postTot - preTot) / 1000000#
+        outArr(i, 5) = preF
+        outArr(i, 6) = postF
+        outArr(i, 7) = postF - preF
+        outArr(i, 8) = preW
+        outArr(i, 9) = postW
+        outArr(i, 10) = dW
+        outArr(i, 11) = tradeJPY
+        outArr(i, 12) = tradeUSD
+        outArr(i, 13) = sharesToTrade
+        outArr(i, 14) = liq
+    Next r
+
+    ws.Range(ws.Cells(2, C_CAT), ws.Cells(lastRow, C_LIQ)).Value = outArr
+
+    'Formats
+    ws.Columns(C_PX).NumberFormat = "#,##0.00"
+    ws.Columns(C_CUR_SH_MM & ":" & C_CHG_SH_MM).NumberFormat = "0.00"
+    ws.Columns(C_CUR_F & ":" & C_CHG_F).NumberFormat = "0.000000"
+    ws.Columns(C_PRE_W & ":" & C_DW).NumberFormat = "0.0000%"
+    ws.Columns(C_TRD_JPY & ":" & C_SH_TRADE).NumberFormat = "#,##0"
+    ws.Columns(C_LIQ).NumberFormat = "0.00"
+    ws.Columns("AC:AD").NumberFormat = "#,##0"
+End Sub
+
+'Category（Addition/Deletion最優先）
+Private Function GetCategory2(preTot As Double, postTot As Double, preF As Double, postF As Double, preIdx As Double, postIdx As Double) As String
+    If preIdx = 0 And postIdx > 0 Then GetCategory2 = "Addition": Exit Function
+    If preIdx > 0 And postIdx = 0 Then GetCategory2 = "Deletion": Exit Function
+
+    If (postF - preF) > 0.000001 Then GetCategory2 = "FFW Increase": Exit Function
+    If (postF - preF) < -0.000001 Then GetCategory2 = "FFW Decrease": Exit Function
+
+    If (postTot - preTot) > 1 Then GetCategory2 = "Sh. Increase": Exit Function
+    If (postTot - preTot) < -1 Then GetCategory2 = "Sh. Decrease": Exit Function
+
+    If preIdx = 0 And postIdx = 0 Then GetCategory2 = "NULL" Else GetCategory2 = "Funding/Reinvestment"
+End Function
+
+'============================
+' Load Sheet2
+'============================
+Private Function LoadPortfolio_S2(ws As Worksheet) As Object
+    Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = vbTextCompare
+
+    Dim lastRow As Long, lastCol As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    Dim data As Variant
+    data = ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, lastCol)).Value2
+
+    Dim cCode As Long: cCode = FindCol(data, "LOCAL_CODE")
+    Dim cName As Long: cName = FindCol(data, "LOCAL_NAME")
+    Dim cPrc  As Long: cPrc = FindCol(data, "PRC_BASE")
+    Dim cTot  As Long: cTot = FindCol(data, "TOT_SHARES")
+    Dim cFFW  As Long: cFFW = FindCol(data, "IDX_FFW")
+    Dim cIdxS As Long: cIdxS = FindCol(data, "IDX_SHARES")
+
+    Dim r As Long
+    For r = 2 To UBound(data, 1)
+        If Len(data(r, cCode) & vbNullString) = 0 Then GoTo ContinueR
+
+        Dim code As String: code = CStr(data(r, cCode))
+
+        Dim h As Object: Set h = CreateObject("Scripting.Dictionary")
+        h.CompareMode = vbTextCompare
+        h("CODE") = code
+        h("NAME") = Nz(data(r, cName))
+        h("PRC") = ToDbl(data(r, cPrc))
+        h("TOT_SHARES") = ToDbl(data(r, cTot))
+        h("IDX_FFW") = ToDbl(data(r, cFFW))
+        h("IDX_SHARES") = ToDbl(data(r, cIdxS))
+
+        If dict.Exists(code) Then
+            Set dict(code) = h
+        Else
+            dict.Add code, h
+        End If
+
+ContinueR:
+    Next r
+
+    Set LoadPortfolio_S2 = dict
+End Function
+
+Private Function GetBaseDate(ws As Worksheet) As Long
+    Dim lastCol As Long: lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    Dim data As Variant
+    data = ws.Range(ws.Cells(1, 1), ws.Cells(2, lastCol)).Value2
+    GetBaseDate = CLng(ToDbl(data(2, FindCol(data, "TARGET_DATE"))))
+End Function
+
+'============================
+' Apply Sheet3 changes (overwrite new levels; ignore *_CHG)
+'============================
+Private Sub ApplyChanges_S3_Overwrite(ByRef holdings As Object, ws As Worksheet, fromDate As Long, toDate As Long)
+    If toDate < fromDate Then Exit Sub
+
+    Dim lastRow As Long, lastCol As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    Dim data As Variant
+    data = ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, lastCol)).Value2
+
+    Dim cCode As Long: cCode = FindCol(data, "LOCAL_CODE")
+    Dim cEff  As Long: cEff = FindCol(data, "EFFECTIVE_DATE")
+    Dim cEvt  As Long: cEvt = FindCol(data, "EVENT_CODE")
+
+    Dim cName As Long: cName = FindColAllowMissing(data, "LOCAL_NAME")
+    Dim cIdxS As Long: cIdxS = FindColAllowMissing(data, "IDX_SHARES")
+    Dim cTot  As Long: cTot = FindColAllowMissing(data, "TOT_SHARES")
+    Dim cNewFFW As Long: cNewFFW = FindColAllowMissing(data, "NEW_IDX_FFW")
+
+    Dim r As Long
+    For r = 2 To UBound(data, 1)
+        If Len(data(r, cCode) & vbNullString) = 0 Then GoTo ContinueR
+
+        Dim eff As Long: eff = CLng(ToDbl(data(r, cEff)))
+        If eff < fromDate Or eff > toDate Then GoTo ContinueR
+
+        Dim code As String: code = CStr(data(r, cCode))
+        Dim evt As String: evt = CStr(data(r, cEvt))
+
+        Dim h As Object
+        If holdings.Exists(code) Then
+            Set h = holdings(code)
+        Else
+            Set h = CreateObject("Scripting.Dictionary")
+            h.CompareMode = vbTextCompare
+            h("CODE") = code
+            h("NAME") = IIf(cName > 0, Nz(data(r, cName)), "")
+            h("PRC") = 0#
+            h("TOT_SHARES") = 0#
+            h("IDX_FFW") = 0#
+            h("IDX_SHARES") = 0#
+            holdings.Add code, h
+        End If
+
+        'Ignore (no portfolio impact)
+        If evt = "30" Or evt = "C1" Or evt = "SK" Then GoTo ContinueR
+
+        'Deletion-like
+        If evt = "19" Or evt = "C2" Or evt = "P1" Then
+            h("TOT_SHARES") = 0#
+            h("IDX_SHARES") = 0#
+            GoTo ContinueR
+        End If
+
+        'Overwrite new levels
+        If cTot > 0 Then If HasValue(data(r, cTot)) Then h("TOT_SHARES") = ToDbl(data(r, cTot))
+        If cIdxS > 0 Then If HasValue(data(r, cIdxS)) Then h("IDX_SHARES") = ToDbl(data(r, cIdxS))
+        If cNewFFW > 0 Then If HasValue(data(r, cNewFFW)) Then h("IDX_FFW") = ToDbl(data(r, cNewFFW))
+
+ContinueR:
+    Next r
+End Sub
+
+'============================
+' Utilities
+'============================
+Private Function CloneHoldings(src As Object) As Object
+    Dim dst As Object: Set dst = CreateObject("Scripting.Dictionary")
+    dst.CompareMode = vbTextCompare
+
+    Dim k As Variant
+    For Each k In src.Keys
+        Dim h0 As Object: Set h0 = src(k)
+        Dim h As Object: Set h = CreateObject("Scripting.Dictionary")
+        h.CompareMode = vbTextCompare
+
+        Dim kk As Variant
+        For Each kk In h0.Keys
+            h(kk) = h0(kk)
+        Next kk
+
+        dst.Add CStr(k), h
+    Next k
+
+    Set CloneHoldings = dst
+End Function
+
+Private Function FindCol(data As Variant, headerName As String) As Long
+    Dim j As Long
+    For j = 1 To UBound(data, 2)
+        If UCase$(Trim$(CStr(data(1, j)))) = UCase$(headerName) Then
+            FindCol = j
+            Exit Function
+        End If
+    Next j
+    Err.Raise vbObjectError + 100, , "Missing column: " & headerName
+End Function
+
+Private Function FindColAllowMissing(data As Variant, headerName As String) As Long
+    Dim j As Long
+    For j = 1 To UBound(data, 2)
+        If UCase$(Trim$(CStr(data(1, j)))) = UCase$(headerName) Then
+            FindColAllowMissing = j
+            Exit Function
+        End If
+    Next j
+    FindColAllowMissing = 0
+End Function
+
+Private Function Nz(v As Variant) As String
+    If IsEmpty(v) Or IsNull(v) Or IsError(v) Then Nz = "" Else Nz = CStr(v)
+End Function
+
+Private Function HasValue(v As Variant) As Boolean
+    If IsError(v) Then HasValue = False: Exit Function
+    If IsEmpty(v) Or IsNull(v) Then HasValue = False: Exit Function
+    Dim s As String: s = Trim$(CStr(v))
+    If s = "" Or UCase$(s) = "NULL" Then HasValue = False Else HasValue = True
+End Function
+
+Private Function ToDbl(v As Variant) As Double
+    On Error GoTo EH
+    If IsError(v) Or IsEmpty(v) Or IsNull(v) Then ToDbl = 0#: Exit Function
+
+    Dim s As String: s = Trim$(CStr(v))
+    If s = "" Or UCase$(s) = "NULL" Then ToDbl = 0#: Exit Function
+
+    s = Replace(s, ",", "")
+    ToDbl = CDbl(s)
+    Exit Function
+EH:
+    ToDbl = 0#
+End Function
+
