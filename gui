@@ -1,0 +1,346 @@
+import { useState, useEffect } from "react";
+
+const AGGREGATE_LABELS = {
+  50: "Number of Shareholders",
+  51: "Number of Unit Shareholders",
+  52: "Shares Issued",
+  53: "Foreigners",
+  54: "Major Shareholders",
+  55: "Floating Shares",
+  56: "Investment Trusts",
+  57: "Pension Trusts",
+  58: "Employee Stock Ownership Plan",
+  59: "Officers",
+  60: "Top 10 Shareholders",
+  61: "Treasury Stock"
+};
+
+function round6(num) {
+  return Math.round(num * 1e6) / 1e6;
+}
+function ceilStep(num, step = 0.05) {
+  return Math.ceil(num / step) * step;
+}
+
+// 5桁ゼロ埋め
+function normalizeCode(code) {
+  if (!code) return "";
+  return code.length < 5 ? code.padStart(5, "0") : code;
+}
+
+export default function Home() {
+  const [companyRaw, setCompanyRaw] = useState("1301");
+  const company = normalizeCode(companyRaw); // 必ず5桁に
+
+  const [data, setData] = useState([]);
+  const [ffwHistory, setFfwHistory] = useState([]);
+  const [changes, setChanges] = useState([]);
+
+  useEffect(() => {
+    if (!company) return;
+    fetch(`/api/major_shareholders?company=${company}`)
+      .then(res => res.json())
+      .then(setData);
+
+    fetch(`/api/ffw_timeseries?company=${company}`)
+      .then(res => res.json())
+      .then(setFfwHistory);
+
+    fetch(`/api/index_change_history?company=${company}`)
+      .then(res => res.json())
+      .then(setChanges);
+  }, [company]);
+
+  // 本決算のみ残す (settlement_flag=0)
+  const fullTermData = data.filter(
+    row =>
+      row.settlement_flag === 0 ||
+      row.settlement_flag === "0" ||
+      row.settlement_flag === "00"
+  );
+
+  // settlement_termごとにグループ化
+  const grouped = {};
+  fullTermData.forEach(row => {
+    if (!grouped[row.settlement_term]) grouped[row.settlement_term] = [];
+    grouped[row.settlement_term].push(row);
+  });
+
+  const terms = Object.keys(grouped).sort();
+
+  // サマリー計算
+  const summaryByTerm = {};
+  terms.forEach(term => {
+    const termRows = grouped[term];
+    const issued = termRows.find(r => r.data_id === 52)?.shares ?? null;
+    let major = termRows.find(r => r.data_id === 54)?.shares ?? null;
+    let usedLabels = [];
+    if (major !== null && major !== 0) {
+      usedLabels = ["major"];
+    }
+    if ((major === null || major === 0) && issued) {
+      const top10 = termRows.find(r => r.data_id === 60)?.shares ?? 0;
+      const treasury = termRows.find(r => r.data_id === 61)?.shares ?? 0;
+      const officers = termRows.find(r => r.data_id === 59)?.shares ?? 0;
+      const top10Rows = termRows.filter(r => r.data_id >= 1 && r.data_id <= 10);
+      const hasTrStockInTop10 = top10Rows.some(
+        r => r.name_en && r.name_en.toLowerCase().includes("tr.stock")
+      );
+      let alt_major = top10 + officers;
+      usedLabels = ["top10", "officers"];
+      if (!hasTrStockInTop10) {
+        alt_major += treasury;
+        usedLabels.push("treasury");
+      }
+      major = alt_major;
+    }
+
+    if (issued && major !== null) {
+      const fixedRatio = round6(major / issued);
+      const floatRatioRaw = round6(1 - fixedRatio);
+      const ffwRatio = ceilStep(floatRatioRaw, 0.05);
+      summaryByTerm[term] = {
+        fixedRatio,
+        floatRatioRaw,
+        ffwRatio,
+        issued,
+        major,
+        usedLabels
+      };
+    }
+  });
+
+  // 1～35位: どこかのtermに株主がいれば表示
+  const rankData = {};
+  for (let i = 1; i <= 35; i++) {
+    rankData[i] = {};
+    terms.forEach(term => {
+      const row = grouped[term]?.find(r => r.data_id === i);
+      if (row && row.name_en) rankData[i][term] = row;
+    });
+  }
+  const ranksToShow = Object.entries(rankData)
+    .filter(([, termMap]) => Object.keys(termMap).length > 0)
+    .map(([rank]) => Number(rank));
+
+  // 50～61: どこかのtermに値があれば表示
+  const aggrData = {};
+  for (let i = 50; i <= 61; i++) {
+    aggrData[i] = {};
+    terms.forEach(term => {
+      const row = grouped[term]?.find(r => r.data_id === i);
+      if (row && row.name_en) aggrData[i][term] = row;
+    });
+  }
+  const aggrToShow = Object.entries(aggrData)
+    .filter(([, termMap]) => Object.keys(termMap).length > 0)
+    .map(([i]) => Number(i));
+
+  function shouldHighlight(i, term) {
+    const labels = summaryByTerm[term]?.usedLabels || [];
+    if (i === 54 && labels.includes("major")) return true;
+    if (i === 60 && labels.includes("top10")) return true;
+    if (i === 59 && labels.includes("officers")) return true;
+    if (i === 61 && labels.includes("treasury")) return true;
+    return false;
+  }
+
+  return (
+    <div>
+      <h1>大株主時系列比較・本決算のみ・サマリー付</h1>
+      <label>
+        銘柄コード:{" "}
+        <input
+          value={companyRaw}
+          onChange={e => setCompanyRaw(e.target.value)}
+          placeholder="例: 1301 または 13010"
+        />
+      </label>
+      <span style={{marginLeft: 12, color: "#888"}}>検索コード: {company}</span>
+
+      {/* サマリー */}
+      <h2>サマリー（固定株比率/浮動株比率/FFW浮動株比率 推移）</h2>
+      <table border={1}>
+        <thead>
+          <tr>
+            <th>期</th>
+            <th>固定株比率<br />(major / issued)</th>
+            <th>浮動株比率<br />(1 - 固定株比率, 切り上げ前)</th>
+            <th>FFW浮動株比率<br />(0.05切り上げ)</th>
+            <th>構成要素</th>
+          </tr>
+        </thead>
+        <tbody>
+          {terms.map(
+            term =>
+              summaryByTerm[term] && (
+                <tr key={term}>
+                  <td>{term}</td>
+                  <td>
+                    {summaryByTerm[term].fixedRatio}
+                    <br />
+                    ({summaryByTerm[term].major} / {summaryByTerm[term].issued})
+                  </td>
+                  <td>{summaryByTerm[term].floatRatioRaw}</td>
+                  <td>{summaryByTerm[term].ffwRatio.toFixed(2)}</td>
+                  <td>
+                    {summaryByTerm[term].usedLabels &&
+                      summaryByTerm[term].usedLabels.map(l => {
+                        if (l === "major") return "Major Shareholders ";
+                        if (l === "top10") return "Top 10 Shareholders ";
+                        if (l === "officers") return "Officers ";
+                        if (l === "treasury") return "Treasury Stock ";
+                        return l;
+                      })}
+                  </td>
+                </tr>
+              )
+          )}
+        </tbody>
+      </table>
+
+      {/* ランキング＋集計 */}
+      <div style={{ overflowX: "auto", marginTop: 20 }}>
+        <table border={1}>
+          <thead>
+            <tr>
+              <th>順位/項目</th>
+              {terms.map(term => (
+                <th key={term}>{term}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ranksToShow.map(i => (
+              <tr key={i}>
+                <td>{i}位</td>
+                {terms.map(term => {
+                  const row = rankData[i][term];
+                  return (
+                    <td key={term}>
+                      {row ? (
+                        <>
+                          {row.name_en}
+                          <br />
+                          {row.shares}株 ({row.pct}%)
+                        </>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+            {aggrToShow.length > 0 && (
+              <tr>
+                <td colSpan={terms.length + 1}>
+                  <hr />
+                </td>
+              </tr>
+            )}
+            {aggrToShow.map(i => (
+              <tr key={i}>
+                <td>{AGGREGATE_LABELS[i] || `${i}`}</td>
+                {terms.map(term => {
+                  const row = aggrData[i][term];
+                  const highlight = shouldHighlight(i, term);
+                  return (
+                    <td
+                      key={term}
+                      style={
+                        highlight
+                          ? { background: "#ffff99", fontWeight: "bold" }
+                          : {}
+                      }
+                    >
+                      {row ? (
+                        <>
+                          {row.shares}
+                          {row.shares !== null ? "株" : ""}
+                          {typeof row.pct === "number"
+                            ? ` (${row.pct}%)`
+                            : ""}
+                        </>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* --- 追加: TOPIX浮動株比率の時系列 --- */}
+      <h2 style={{ marginTop: 40 }}>TOPIX浮動株比率（FFW）の時系列</h2>
+      <div style={{ overflowX: "auto" }}>
+        <table border={1}>
+          <thead>
+            <tr>
+              <th>日付</th>
+              <th>FFW</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ffwHistory.length === 0 ? (
+              <tr>
+                <td colSpan={2}>データなし</td>
+              </tr>
+            ) : (
+              ffwHistory.map(row => (
+                <tr key={row.日付}>
+                  <td>{row.日付}</td>
+                  <td>{row.FFW}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* --- 追加: 変更履歴 --- */}
+      <h2>指数修正日ベースの変更履歴</h2>
+      <div style={{ overflowX: "auto" }}>
+        <table border={1}>
+          <thead>
+            <tr>
+              <th>指数修正日</th>
+              <th>事象コード</th>
+              <th>事象</th>
+              <th>追加指数用株式数</th>
+              <th>追加指数用株式数（100％型）</th>
+              <th>指数用株式数（修正日時点）</th>
+              <th>指数用株式数（100％型）（修正日時点）</th>
+              <th>情報登録日</th>
+              <th>所報掲載日</th>
+            </tr>
+          </thead>
+          <tbody>
+            {changes.length === 0 ? (
+              <tr>
+                <td colSpan={9}>データなし</td>
+              </tr>
+            ) : (
+              changes.map((row, i) => (
+                <tr key={i}>
+                  <td>{row.指数修正日}</td>
+                  <td>{row.事象コード}</td>
+                  <td>{row.事象}</td>
+                  <td>{row.追加指数用株式数}</td>
+                  <td>{row["追加指数用株式数（100％型）"]}</td>
+                  <td>{row["指数用株式数（修正日時点）"]}</td>
+                  <td>{row["指数用株式数（100％型）（修正日時点）"]}</td>
+                  <td>{row.情報登録日}</td>
+                  <td>{row.所報掲載日}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
