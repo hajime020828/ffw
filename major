@@ -1,0 +1,23 @@
+company	企業コード（証券コード等）
+settlement_term	決算期（YYYYMMDD形式）
+settlement_flag	決算特定フラグ（例: 0=本決算, 99=中間など）
+data_id	データ識別子（株主順位/指標種別）
+name_en	株主名または指標名（英語）
+name_jp	株主名または指標名（日本語）
+shareholder_code	株主コード（外部識別用）
+shareholder_attr_flag	株主属性フラグ
+info_flag	他情報フラグ
+shares	株数、または株主数など指標値
+pct	全体に対する比率（%）
+50	Number of Shareholders	株主総数	株主総数（人数）
+51	Number of Unit Shareholders	単元株主数	単元株主数（単元株式以上保有する株主の人数）
+52	Shares Issued	発行済株式総数	発行済株式総数（株数）
+53	Foreigners	外国人持株数	外国人保有株数
+54	Major Shareholders	少数特定者持株数	特定少数株主保有株数
+55	Floating Shares	浮動株数	流通株数
+56	Investment Trusts	投資信託持株数	投資信託保有株数
+57	Pension Trusts	年金信託持株数	年金信託保有株数
+58	Employee Stock Ownership Plan	従業員持株会株数	従業員持株会保有株数
+59	Officers	役員持株数	役員保有株数
+60	Top 10 Shareholders	上位１０位合計	上位10名株主合計株数
+61	Treasury Stock	自己株式数	会社自身が保有する自己株式数
