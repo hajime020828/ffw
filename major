@@ -124,3 +124,7 @@ company	settlement_term	settlement_flag	data_id	name_en	name_jp	shareholder_code
 1332	20200331	0	1							
 1332	20200331	0	2							
 1332	20200331	0	3							
+
+の重複分は二重にカウントしない。従業員
+持株会，証券金融会社，証券信託などの株数を除
+外しないので，取引所の基準とは若干異なる。
