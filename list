@@ -1,0 +1,213 @@
+
+"use client";
+
+import { useState, useMemo } from "react"; import Link from "next/link";
+
+type SummaryHistory = {
+  term: string;
+  effective: string;
+  calc_ffw: number | null;
+  rounded_calc_ffw: number | null;
+  actual_ffw: number | null;
+  diff: number | null;
+};
+
+type SummaryData = {
+  company: string;
+  name_en: string;
+  name_jp: string;
+  history: SummaryHistory[];
+};
+
+type ApiResponse = {
+  data: SummaryData[];
+};
+
+export default function ListPage() {
+  const [data, setData] = useState<ApiResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false); // ★追加: ロード済みフラグ
+
+  const [sortBy, setSortBy] = useState<"diff" | "code">("diff");
+  const [filterQuarter, setFilterQuarter] = useState<"all" | "1-3" | "4-6" | "7-9" | "10-12">("all");
+
+  // ★変更: 自動取得ではなく、ボタンクリックで取得する処理
+  const handleLoadData = () => {
+    setLoading(true);
+    fetch("http://localhost:8000/api/summary")
+      .then((res) => res.json())
+      .then((json) => {
+        setData(json);
+        setIsLoaded(true);
+        setLoading(false);
+      })
+      .catch(() => {
+        alert("Failed to fetch summary data.");
+        setLoading(false);
+      });
+  };
+
+  const filteredAndSortedData = useMemo(() => {
+    if (!data) return [];
+    
+    let processed = data.data.filter((row) => {
+      if (filterQuarter === "all") return true;
+      if (row.history.length === 0) return false;
+      
+      const latestTerm = row.history[row.history.length - 1].term;
+      const month = parseInt(latestTerm.substring(4, 6), 10);
+      
+      if (filterQuarter === "1-3") return month >= 1 && month <= 3;
+      if (filterQuarter === "4-6") return month >= 4 && month <= 6;
+      if (filterQuarter === "7-9") return month >= 7 && month <= 9;
+      if (filterQuarter === "10-12") return month >= 10 && month <= 12;
+      return true;
+    });
+
+    processed.sort((a, b) => {
+      if (sortBy === "diff") {
+        const aLast = a.history[a.history.length - 1]?.diff || 0;
+        const bLast = b.history[b.history.length - 1]?.diff || 0;
+        return Math.abs(bLast) - Math.abs(aLast);
+      } else {
+        return a.company.localeCompare(b.company);
+      }
+    });
+
+    return processed;
+  }, [data, sortBy, filterQuarter]);
+
+  return (
+    <div className="p-4 sm:p-8 bg-gray-100 min-h-screen">
+      <div className="max-w-[1600px] mx-auto">
+        <h1 className="text-2xl font-bold mb-2">TOPIX FFW Summary List (本決算のみ)</h1>
+        
+        <div className="flex flex-wrap gap-4 mb-6 items-center bg-white p-4 rounded shadow-sm border">
+          <div className="flex flex-wrap gap-6">
+            <div>
+              <label className="text-sm font-bold mr-2 text-gray-600">決算期フィルタ:</label>
+              <select 
+                value={filterQuarter} 
+                onChange={(e) => setFilterQuarter(e.target.value as any)}
+                className="border p-2 rounded text-sm bg-gray-50 cursor-pointer outline-none focus:ring-2"
+              >
+                <option value="all">すべての決算期</option>
+                <option value="1-3">1月 - 3月 決算</option>
+                <option value="4-6">4月 - 6月 決算</option>
+                <option value="7-9">7月 - 9月 決算</option>
+                <option value="10-12">10月 - 12月 決算</option>
+              </select>
+            </div>
+            
+            <div>
+              <label className="text-sm font-bold mr-2 text-gray-600">並び順:</label>
+              <select 
+                value={sortBy} 
+                onChange={(e) => setSortBy(e.target.value as any)}
+                className="border p-2 rounded text-sm bg-gray-50 cursor-pointer outline-none focus:ring-2"
+              >
+                <option value="diff">最新期の誤差が大きい順</option>
+                <option value="code">銘柄コード順 (昇順)</option>
+              </select>
+            </div>
+            
+            {/* ★新規追加: 手動ロードボタン */}
+            <button 
+              onClick={handleLoadData}
+              disabled={loading}
+              className="bg-blue-600 text-white px-8 py-2 rounded font-bold hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {loading ? "Loading Data..." : "Load Summary"}
+            </button>
+          </div>
+
+          {isLoaded && (
+            <div className="font-bold text-lg text-gray-800 border-l pl-6 ml-auto">
+              対象銘柄数: <span className="text-blue-600 text-2xl">{filteredAndSortedData.length}</span> 件
+            </div>
+          )}
+        </div>
+        
+        {/* 未ロード時のメッセージ */}
+        {!isLoaded && !loading && (
+          <div className="bg-white p-12 text-center text-gray-500 rounded border border-dashed border-gray-300">
+            <p className="text-xl mb-2">条件を選択し、「Load Summary」ボタンを押してください。</p>
+            <p className="text-sm">※処理には数秒かかる場合があります。</p>
+          </div>
+        )}
+
+        {/* ロード中のメッセージ */}
+        {loading && (
+          <div className="bg-white p-12 text-center text-blue-600 rounded border font-bold text-xl shadow-sm">
+            データベースから全銘柄の計算と照合を行っています...
+          </div>
+        )}
+        
+        {/* データリスト */}
+        {isLoaded && !loading && (
+          <div className="flex flex-col gap-4">
+            {filteredAndSortedData.map((row) => (
+              <div key={row.company} className="flex flex-col sm:flex-row border rounded-lg overflow-hidden shadow-sm hover:shadow-md transition-shadow bg-white">
+                
+                <div className="bg-gray-800 text-white p-4 w-full sm:w-56 flex-shrink-0 flex flex-col justify-center sm:justify-start border-b sm:border-b-0 sm:border-r border-gray-700">
+                  <Link href={`/?ticker=${row.company}`} className="text-2xl font-bold text-blue-300 hover:text-blue-100 hover:underline">
+                    {row.company}
+                  </Link>
+                  <div className="text-xs text-gray-400 mt-2 break-words leading-tight">
+                    {row.name_en || row.name_jp || "-"}
+                  </div>
+                </div>
+                
+                <div className="flex overflow-x-auto p-4 gap-4 w-full bg-gray-50 scrollbar-thin">
+                  {row.history.map((h) => {
+                    const diffColor = h.diff && Math.abs(h.diff) > 0.05 
+                      ? "text-red-600" 
+                      : h.diff && Math.abs(h.diff) > 0.01 
+                        ? "text-orange-500" 
+                        : "text-green-600";
+                        
+                    return (
+                      <div key={h.term} className="min-w-[220px] border border-gray-200 rounded p-3 bg-white flex-shrink-0 shadow-sm flex flex-col justify-between">
+                        <div className="border-b pb-2 mb-3 flex justify-between items-end">
+                          <span className="font-bold text-gray-800">{h.term}</span>
+                          <span className="text-[10px] text-gray-500 bg-gray-100 px-1 rounded">適用: {h.effective}</span>
+                        </div>
+                        
+                        <div className="text-sm space-y-2 font-mono">
+                          <div className="flex justify-between items-center">
+                            <span className="text-gray-500 text-xs">Actual (A)</span>
+                            <span className="font-medium text-gray-800">{h.actual_ffw !== null ? h.actual_ffw.toFixed(5) : "---"}</span>
+                          </div>
+                          <div className="flex justify-between items-center font-bold text-yellow-800 bg-yellow-50 px-1.5 py-0.5 rounded">
+                            <span className="text-xs">Round (B)</span>
+                            <span className="text-base">{h.rounded_calc_ffw !== null ? h.rounded_calc_ffw.toFixed(2) : "---"}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-xs text-gray-400">
+                            <span>Raw FFW</span>
+                            <span>{h.calc_ffw !== null ? h.calc_ffw.toFixed(5) : "-"}</span>
+                          </div>
+                        </div>
+                        
+                        <div className={`mt-4 pt-2 border-t font-mono font-bold flex justify-between items-center ${diffColor}`}>
+                          <span className="text-xs text-gray-500 font-sans">Diff (B-A)</span>
+                          <span className="text-lg">{h.diff !== null ? (h.diff > 0 ? "+" : "") + h.diff.toFixed(2) : "---"}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+            
+            {filteredAndSortedData.length === 0 && (
+              <div className="bg-white p-8 text-center text-gray-500 rounded border">
+                条件に一致する銘柄がありません。
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
