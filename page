@@ -1,0 +1,452 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+
+const API_BASE = "http://localhost:8000";
+
+type Shareholder = {
+  data_id: number;
+  name_jp: string;
+  name_en: string;
+  shares: number | null;
+  pct: number | null;
+  is_fixed: number;
+  override_shares: number | null;
+};
+
+type TermHistory = {
+  settlement_term: string;
+  settlement_flag: number;
+  target_topix_month: string;
+  actual_ffw: number | null;
+  actual_ffw_date: string | null;
+  shareholders: Shareholder[];
+};
+
+type ApiResponse = {
+  company: string;
+  company_name_en: string;
+  company_name_jp: string;
+  history: TermHistory[];
+};
+
+type Ticker = {
+  code: string;
+  name_jp: string;
+  name_en: string;
+};
+
+export default function Home() {
+  const [company, setCompany] = useState("7203");
+  const [data, setData] = useState<ApiResponse | null>(null);
+  const [tickers, setTickers] = useState<Ticker[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [isFullYearOnly, setIsFullYearOnly] = useState(true);
+
+  const uniqueTickers = useMemo(() => {
+    const m = new Map<string, Ticker>();
+    for (const t of tickers) {
+      if (!m.has(t.code)) m.set(t.code, t);
+    }
+    return Array.from(m.values());
+  }, [tickers]);
+
+  const fetchData = async (ticker?: string) => {
+    const code = (ticker ?? company).trim();
+    if (!code) return;
+
+    setLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/shareholders/${encodeURIComponent(code)}`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = (await res.json()) as ApiResponse;
+      setData(json);
+    } catch (err) {
+      console.error(err);
+      alert("Failed to fetch data. Please check DB and ticker code.");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 初回ロード
+  useEffect(() => {
+    fetch(`${API_BASE}/api/tickers`)
+      .then((res) => res.json())
+      .then((json) => setTickers(json))
+      .catch((err) => console.error("Failed to load tickers:", err));
+
+    const params = new URLSearchParams(window.location.search);
+    const tickerFromUrl = params.get("ticker");
+    if (tickerFromUrl) {
+      setCompany(tickerFromUrl);
+      fetchData(tickerFromUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const visibleHistory = useMemo(() => {
+    if (!data) return [];
+    return isFullYearOnly
+      ? data.history.filter((h) => h.settlement_flag === 0)
+      : data.history;
+  }, [data, isFullYearOnly]);
+
+  const handleToggleFixed = (targetTerm: string, data_id: number) => {
+    if (!data) return;
+    const newData: ApiResponse = {
+      ...data,
+      history: data.history.map((h) => {
+        if (h.settlement_term !== targetTerm) return h;
+        return {
+          ...h,
+          shareholders: h.shareholders.map((s) =>
+            s.data_id === data_id ? { ...s, is_fixed: s.is_fixed === 1 ? 0 : 1 } : s
+          ),
+        };
+      }),
+    };
+    setData(newData);
+  };
+
+  const handleShareChange = (targetTerm: string, data_id: number, val: string) => {
+    if (!data) return;
+    const numVal = val === "" ? null : parseInt(val, 10);
+
+    const newData: ApiResponse = {
+      ...data,
+      history: data.history.map((h) => {
+        if (h.settlement_term !== targetTerm) return h;
+        return {
+          ...h,
+          shareholders: h.shareholders.map((s) =>
+            s.data_id === data_id ? { ...s, override_shares: numVal } : s
+          ),
+        };
+      }),
+    };
+    setData(newData);
+  };
+
+  const handleSave = async () => {
+    if (!data) return;
+    setSaving(true);
+    try {
+      for (const term of data.history) {
+        const overrides = term.shareholders.map((s) => ({
+          data_id: s.data_id,
+          is_fixed: s.is_fixed,
+          override_shares: s.override_shares,
+        }));
+
+        const res = await fetch(`${API_BASE}/api/overrides`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            company: data.company,
+            settlement_term: term.settlement_term,
+            overrides,
+          }),
+        });
+
+        if (!res.ok) throw new Error(`Save failed: HTTP ${res.status}`);
+      }
+      alert("Successfully saved data for all terms.");
+    } catch (e) {
+      console.error(e);
+      alert("Failed to save data.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // フロント側の計算（バックエンド summary と同じ寄せ）
+  const calculatedMetrics = useMemo(() => {
+    return visibleHistory.map((term) => {
+      const totalRow = term.shareholders.find((s) => s.data_id === 52);
+      const totalShares = totalRow?.override_shares ?? totalRow?.shares ?? 0;
+
+      let fixedShares = 0;
+
+      // fixed対象は (<50 or 59 or 61) だけに寄せる
+      for (const s of term.shareholders) {
+        if (s.data_id === 0 || s.data_id === 52) continue;
+        const val = s.override_shares ?? s.shares ?? 0;
+
+        const isFixedTarget = s.data_id < 50 || s.data_id === 59 || s.data_id === 61;
+        if (s.is_fixed === 1 && isFixedTarget) {
+          fixedShares += val;
+        }
+      }
+
+      const ffw = totalShares === 0 ? null : 1 - fixedShares / totalShares;
+      const roundedFfw =
+        ffw === null ? null : Math.ceil(Number((ffw * 20).toFixed(6))) / 20;
+
+      return { ffw, roundedFfw, fixedShares, totalShares };
+    });
+  }, [visibleHistory]);
+
+  const uniqueShareholders = useMemo(() => {
+    const nameMap = new Map<string, number>();
+    visibleHistory.forEach((term) => {
+      term.shareholders.forEach((s) => {
+        const inScope = (s.data_id > 0 && s.data_id < 50) || s.data_id === 59 || s.data_id === 61;
+        if (!inScope) return;
+
+        const name = s.name_en || s.name_jp;
+        if (!name) return;
+
+        const currentMin = nameMap.get(name) ?? Infinity;
+        nameMap.set(name, Math.min(currentMin, s.data_id));
+      });
+    });
+
+    return Array.from(nameMap.entries())
+      .sort((a, b) => a[1] - b[1])
+      .map(([name]) => name);
+  }, [visibleHistory]);
+
+  return (
+    <div className="min-h-screen bg-gray-50 p-4 sm:p-8 text-black">
+      <div className="w-full mx-auto bg-white p-6 rounded shadow">
+        <h1 className="text-2xl font-bold mb-2">Time-Series FFW Simulator</h1>
+
+        {data && (
+          <h2 className="text-xl font-bold text-gray-700 mb-6 border-b pb-2">
+            {data.company} - {data.company_name_en || data.company_name_jp}
+          </h2>
+        )}
+        {!data && <div className="mb-6 border-b pb-2"></div>}
+
+        <div className="flex flex-wrap gap-4 mb-6 items-end">
+          <div>
+            <label className="block text-sm font-medium mb-1">Ticker Code</label>
+            <input
+              type="text"
+              list="tickers-list"
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+              className="border p-2 rounded w-40 outline-none focus:ring-2"
+              placeholder="Ex: 7203"
+            />
+            <datalist id="tickers-list">
+              {uniqueTickers.map((t) => (
+                <option key={t.code} value={t.code}>
+                  {t.name_jp} / {t.name_en}
+                </option>
+              ))}
+            </datalist>
+          </div>
+
+          <button
+            id="auto-fetch-btn"
+            onClick={() => fetchData()}
+            disabled={loading}
+            className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-50"
+          >
+            {loading ? "Fetching..." : "Fetch Data"}
+          </button>
+
+          <label className="flex items-center gap-2 ml-4 cursor-pointer bg-gray-100 hover:bg-gray-200 border px-4 py-2 rounded transition-colors">
+            <input
+              type="checkbox"
+              checked={isFullYearOnly}
+              onChange={(e) => setIsFullYearOnly(e.target.checked)}
+              className="w-4 h-4 cursor-pointer"
+            />
+            <span className="text-sm font-bold text-gray-800">Full Year Only</span>
+          </label>
+
+          <button
+            onClick={handleSave}
+            disabled={saving || !data}
+            className="bg-green-600 text-white px-6 py-2 rounded hover:bg-green-700 disabled:opacity-50 ml-auto"
+          >
+            {saving ? "Saving..." : "Save to DB"}
+          </button>
+        </div>
+
+        {data && (
+          <div className="overflow-x-auto border rounded shadow-sm">
+            <table className="w-full text-left text-sm whitespace-nowrap">
+              <thead className="bg-gray-800 text-white sticky top-0 z-20">
+                <tr>
+                  <th className="p-3 min-w-[200px] sticky left-0 bg-gray-800 z-30">
+                    Item / Shareholder
+                  </th>
+                  {visibleHistory.map((term) => (
+                    <th
+                      key={term.settlement_term}
+                      className="p-3 border-l border-gray-600 min-w-[160px]"
+                    >
+                      {term.settlement_term} <br />
+                      <span className="text-xs text-gray-400">
+                        Effective: {term.target_topix_month}
+                      </span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+
+              <tbody className="bg-blue-50 border-b-4 border-double border-gray-300">
+                <tr>
+                  <td className="p-3 font-bold sticky left-0 bg-blue-50 z-10 border-r">
+                    TOPIX Actual (A)
+                  </td>
+                  {visibleHistory.map((term) => (
+                    <td key={term.settlement_term} className="p-3 border-l font-mono text-lg">
+                      {term.actual_ffw !== null ? term.actual_ffw.toFixed(5) : "---"}
+                    </td>
+                  ))}
+                </tr>
+
+                <tr className="bg-yellow-50">
+                  <td className="p-3 font-bold sticky left-0 bg-yellow-50 z-10 border-r text-yellow-800">
+                    Calc FFW (Rounded 0.05) (B)
+                  </td>
+                  {calculatedMetrics.map((metrics, i) => (
+                    <td
+                      key={i}
+                      className="p-3 border-l font-mono text-xl font-bold text-yellow-800"
+                    >
+                      {metrics.roundedFfw !== null ? metrics.roundedFfw.toFixed(2) : "---"}
+                    </td>
+                  ))}
+                </tr>
+
+                <tr>
+                  <td className="p-3 font-bold sticky left-0 bg-blue-50 z-10 border-r text-gray-600">
+                    Calculated FFW (Raw)
+                  </td>
+                  {calculatedMetrics.map((metrics, i) => (
+                    <td key={i} className="p-3 border-l font-mono text-base text-gray-600">
+                      {metrics.ffw !== null ? metrics.ffw.toFixed(5) : "---"}
+                    </td>
+                  ))}
+                </tr>
+
+                <tr className="bg-blue-100">
+                  <td className="p-3 font-bold sticky left-0 bg-blue-100 z-10 border-r">
+                    Diff (Ratio) (B - A)
+                  </td>
+                  {visibleHistory.map((term, i) => {
+                    const actual = term.actual_ffw;
+                    const calc = calculatedMetrics[i]?.roundedFfw ?? null;
+                    if (actual === null || calc === null) {
+                      return <td key={i} className="p-3 border-l">---</td>;
+                    }
+                    const diff = calc - actual;
+                    const color = Math.abs(diff) < 0.00001 ? "text-green-600" : "text-red-600";
+                    return (
+                      <td key={i} className={`p-3 border-l font-mono font-bold ${color}`}>
+                        {diff > 0 ? "+" : ""}{diff.toFixed(2)}
+                      </td>
+                    );
+                  })}
+                </tr>
+
+                <tr className="bg-red-50">
+                  <td className="p-3 font-bold sticky left-0 bg-red-50 z-10 border-r">
+                    Diff (Shares) (Calc - Actual)
+                  </td>
+                  {visibleHistory.map((term, i) => {
+                    const actualFfw = term.actual_ffw;
+                    const metrics = calculatedMetrics[i];
+                    if (actualFfw === null || metrics.ffw === null) {
+                      return <td key={i} className="p-3 border-l">---</td>;
+                    }
+                    const actualFixedShares = Math.round(metrics.totalShares * (1 - actualFfw));
+                    const diffShares = metrics.fixedShares - actualFixedShares;
+                    const color = Math.abs(diffShares) < 1 ? "text-green-600" : "text-red-600";
+                    return (
+                      <td key={i} className={`p-3 border-l font-mono font-bold ${color}`}>
+                        {diffShares > 0 ? "+" : ""}{diffShares.toLocaleString()}
+                      </td>
+                    );
+                  })}
+                </tr>
+
+                <tr>
+                  <td className="p-3 text-gray-600 sticky left-0 bg-blue-50 z-10 border-r">
+                    Total Shares (ID:52)
+                  </td>
+                  {visibleHistory.map((term) => {
+                    const t = term.shareholders.find((s) => s.data_id === 52);
+                    return (
+                      <td key={term.settlement_term} className="p-3 border-l text-gray-600">
+                        {(t?.override_shares ?? t?.shares)?.toLocaleString() || "-"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              </tbody>
+
+              <tbody>
+                {uniqueShareholders.map((name) => (
+                  <tr key={name} className="border-b hover:bg-gray-100">
+                    <td
+                      className="p-3 font-medium sticky left-0 bg-white z-10 border-r overflow-hidden text-ellipsis max-w-[250px]"
+                      title={name}
+                    >
+                      {name}
+                    </td>
+
+                    {visibleHistory.map((term, tIndex) => {
+                      const shareholder = term.shareholders.find((s) => {
+                        const nm = s.name_en || s.name_jp;
+                        const inScope = s.data_id < 50 || s.data_id === 59 || s.data_id === 61;
+                        return nm === name && inScope;
+                      });
+
+                      if (!shareholder) {
+                        return <td key={tIndex} className="p-3 border-l text-gray-300">-</td>;
+                      }
+
+                      return (
+                        <td
+                          key={tIndex}
+                          className={`p-3 border-l ${shareholder.is_fixed ? "bg-yellow-50" : ""}`}
+                        >
+                          <div className="flex flex-col gap-1">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={shareholder.is_fixed === 1}
+                                onChange={() =>
+                                  handleToggleFixed(term.settlement_term, shareholder.data_id)
+                                }
+                                className="w-4 h-4"
+                              />
+                              <span className="font-mono text-sm">
+                                {(shareholder.override_shares ?? shareholder.shares ?? 0).toLocaleString()}
+                              </span>
+                            </label>
+
+                            <input
+                              type="number"
+                              placeholder="Override..."
+                              value={shareholder.override_shares ?? ""}
+                              onChange={(e) =>
+                                handleShareChange(term.settlement_term, shareholder.data_id, e.target.value)
+                              }
+                              className="border p-1 text-xs w-full rounded"
+                            />
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
